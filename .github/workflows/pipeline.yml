@@ -107,6 +107,21 @@ jobs:
         with:
           cluster_name: trdl
           config: tests/e2e/kind-config.yaml
+      - name: Wait for all nodes to be schedulable
+        # A node can report condition=Ready a moment before the control
+        # plane actually clears its startup "not-ready:NoSchedule" taint.
+        # In that window, pods for all 3 replicas can land on whichever
+        # node clears first. Poll the taint itself, not just the Ready
+        # condition, so this works regardless of how slow the runner is.
+        run: |
+          kubectl wait --for=condition=Ready nodes --all --timeout=120s
+          for i in $(seq 1 60); do
+            remaining=$(kubectl get nodes -o json | jq '[.items[].spec.taints // [] | .[] | select(.key=="node.kubernetes.io/not-ready" and .effect=="NoSchedule")] | length')
+            [ "$remaining" -eq 0 ] && break
+            echo "waiting on $remaining node(s) still tainted not-ready..."
+            sleep 2
+          done
+          kubectl get nodes -o wide
       - uses: azure/setup-helm@v4
         with:
           version: ${{ env.HELM_VERSION }}

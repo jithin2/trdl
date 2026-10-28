@@ -21,8 +21,17 @@ image:          ## Build the container image
 
 e2e: image      ## Full end-to-end run on a local kind cluster
 	kind get clusters | grep -qx $(KIND_CLUSTER) || kind create cluster --name $(KIND_CLUSTER) --config tests/e2e/kind-config.yaml
+	kubectl wait --for=condition=Ready nodes --all --timeout=120s
+	# A node can report Ready a moment before kind actually clears its
+	# startup "not-ready:NoSchedule" taint, which can bunch all pods onto
+	# whichever node clears first. Poll the taint itself, not a guessed delay.
+	for i in $$(seq 1 60); do \\
+	  remaining=$$(kubectl get nodes -o json | jq '[.items[].spec.taints // [] | .[] | select(.key=="node.kubernetes.io/not-ready" and .effect=="NoSchedule")] | length'); \\
+	  [ "$$remaining" -eq 0 ] && break; \\
+	  sleep 2; \\
+	done
 	kind load docker-image trdl:$(TAG) --name $(KIND_CLUSTER)
-	helm upgrade --install trdl charts/trdl --namespace trdl --create-namespace \
+	helm upgrade --install trdl charts/trdl --namespace trdl --create-namespace \\
 	  -f tests/e2e/values-kind.yaml --set image.tag=$(TAG) --wait --timeout 3m
 	bash tests/e2e/smoke.sh
 	bash tests/e2e/check-spread.sh
