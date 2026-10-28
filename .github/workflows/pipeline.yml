@@ -88,7 +88,7 @@ jobs:
         run: docker build --build-arg REVISION="$TAG" -t "$IMAGE:$TAG" app
       - name: Save image for the next jobs
         run: docker save "$IMAGE:$TAG" -o image.tar
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: image
           path: image.tar
