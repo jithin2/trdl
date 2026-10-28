@@ -1,0 +1,20 @@
+{{- if .Values.networkPolicy.enabled }}
+# Only the HTTP port is reachable. All egress is blocked: the app calls nothing.
+# Kubelet probes come from the node and are allowed by the CNI.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "trdl.name" . }}
+  labels:
+    {{- include "trdl.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "trdl.selectorLabels" . | nindent 6 }}
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - ports:
+        - port: http
+          protocol: TCP
+  egress: []
+{{- end }}

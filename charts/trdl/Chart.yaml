@@ -1,0 +1,7 @@
+apiVersion: v2
+name: trdl
+description: The Responding Dark Laughter, an HTTP service that returns 42
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+kubeVersion: ">=1.31.0-0"

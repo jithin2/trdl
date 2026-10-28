@@ -1,0 +1,16 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "trdl.name" . }}
+  labels:
+    {{- include "trdl.labels" . | nindent 4 }}
+spec:
+  # Node drains (upgrades, scale-down) may evict only one pod at a time.
+  maxUnavailable: {{ .Values.podDisruptionBudget.maxUnavailable }}
+  # A pod that is already unhealthy should not block a node drain.
+  unhealthyPodEvictionPolicy: AlwaysAllow
+  selector:
+    matchLabels:
+      {{- include "trdl.selectorLabels" . | nindent 6 }}
+{{- end }}

@@ -1,0 +1,10 @@
+# Terraform
+infra/.terraform/
+infra/*.tfstate
+infra/*.tfstate.*
+infra/backend.hcl
+infra/*.tfvars
+
+# Build output
+image.tar
+app/trdl

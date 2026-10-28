@@ -1,0 +1,95 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "trdl.name" . }}
+  labels:
+    {{- include "trdl.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      {{- include "trdl.selectorLabels" . | nindent 6 }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0   # never go below the desired count during a rollout
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        {{- include "trdl.labels" . | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false   # the app never calls the Kubernetes API
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+        - topologyKey: topology.kubernetes.io/zone
+          maxSkew: {{ .Values.topologySpread.zone.maxSkew }}
+          whenUnsatisfiable: {{ .Values.topologySpread.zone.whenUnsatisfiable }}
+          # Skip tainted (NotReady, cordoned) nodes when counting zones. Without
+          # this, a lost zone still counts as "0 pods" and blocks new pods in
+          # the healthy zones.
+          nodeTaintsPolicy: Honor
+          labelSelector:
+            matchLabels:
+              {{- include "trdl.selectorLabels" . | nindent 14 }}
+        - topologyKey: kubernetes.io/hostname
+          maxSkew: {{ .Values.topologySpread.node.maxSkew }}
+          whenUnsatisfiable: {{ .Values.topologySpread.node.whenUnsatisfiable }}
+          labelSelector:
+            matchLabels:
+              {{- include "trdl.selectorLabels" . | nindent 14 }}
+      containers:
+        - name: trdl
+          image: "{{ .Values.image.repository }}:{{ required "image.tag is required (use the git SHA)" .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.containerPort }}
+              protocol: TCP
+          env:
+            - name: PORT
+              value: {{ .Values.containerPort | quote }}
+            - name: SHUTDOWN_DELAY
+              value: {{ .Values.shutdownDelay | quote }}
+            - name: SHUTDOWN_TIMEOUT
+              value: {{ .Values.shutdownTimeout | quote }}
+            - name: GOMEMLIMIT   # lets the Go GC work inside the memory limit
+              valueFrom:
+                resourceFieldRef:
+                  resource: limits.memory
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          startupProbe:
+            httpGet:
+              path: {{ .Values.probes.startup.path }}
+              port: http
+            periodSeconds: {{ .Values.probes.startup.periodSeconds }}
+            failureThreshold: {{ .Values.probes.startup.failureThreshold }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.probes.liveness.path }}
+              port: http
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.probes.readiness.path }}
+              port: http
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}

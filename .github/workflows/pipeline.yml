@@ -1,0 +1,198 @@
+# Build once, test the exact image, then deploy that same image.
+#
+#   app ──┐
+#         ├─ build ── e2e (kind) ──┐
+#   chart ┘                        ├─ deploy (AKS, main only)
+#   infra ─────────────────────────┘
+#
+name: pipeline
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # One deploy at a time per branch. PR runs cancel older runs of the same PR.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  IMAGE: trdl
+  TAG: ${{ github.sha }}
+  HELM_VERSION: v4.3.1
+
+jobs:
+  app:
+    name: App unit tests
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: app/go.mod
+          cache: false # no dependencies to cache
+      - name: Format
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - name: Vet
+        run: go vet ./...
+      - name: Unit tests
+        run: go test -race -count=1 -cover ./...
+
+  chart:
+    name: Chart and scripts lint
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+      - name: Helm lint
+        run: helm lint charts/trdl --set image.tag=lint -f deploy/poc/values.yaml
+      - name: Render every environment
+        run: |
+          helm template trdl charts/trdl --set image.tag=lint -f deploy/poc/values.yaml > /dev/null
+          helm template trdl charts/trdl --set image.tag=lint -f tests/e2e/values-kind.yaml > /dev/null
+      - name: Chart must refuse a release without an image tag
+        run: "! helm template trdl charts/trdl > /dev/null 2>&1"
+      - name: Shellcheck
+        run: shellcheck tests/e2e/*.sh infra/bootstrap/*.sh
+
+  infra:
+    name: Terraform validate
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: infra
+    steps:
+      - uses: actions/checkout@v7
+      - uses: hashicorp/setup-terraform@v3
+      - run: terraform fmt -check -recursive
+      - run: terraform init -backend=false
+      - run: terraform validate
+
+  build:
+    name: Build image
+    needs: [app, chart]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build
+        run: docker build --build-arg REVISION="$TAG" -t "$IMAGE:$TAG" app
+      - name: Save image for the next jobs
+        run: docker save "$IMAGE:$TAG" -o image.tar
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image
+          path: image.tar
+          retention-days: 1
+
+  e2e:
+    name: End-to-end on kind
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v4
+        with:
+          name: image
+      - uses: helm/kind-action@v1
+        with:
+          cluster_name: trdl
+          config: tests/e2e/kind-config.yaml
+      - uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+      - name: Load image into kind
+        run: kind load image-archive image.tar --name trdl
+      - name: Install chart
+        run: |
+          helm upgrade --install trdl charts/trdl \
+            --namespace trdl --create-namespace \
+            -f tests/e2e/values-kind.yaml \
+            --set image.tag="$TAG" \
+            --wait --timeout 3m
+      - name: Smoke test
+        run: bash tests/e2e/smoke.sh
+      - name: Pods spread over zones
+        run: bash tests/e2e/check-spread.sh
+      - name: Zero-downtime rolling update
+        run: bash tests/e2e/zero-downtime.sh
+      - name: Debug output
+        if: failure()
+        run: |
+          kubectl get nodes --show-labels
+          kubectl -n trdl get all -o wide
+          kubectl -n trdl describe pods
+          kubectl -n trdl logs -l app.kubernetes.io/name=trdl --tail=50 --prefix
+
+  deploy:
+    name: Deploy to AKS (poc)
+    needs: [e2e, infra]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    environment:
+      name: poc
+      url: ${{ steps.smoke.outputs.url }}
+    permissions:
+      contents: read
+      id-token: write # OIDC token for Azure, no stored secret
+    env:
+      ACR_NAME: ${{ vars.ACR_NAME }}
+      AKS_RESOURCE_GROUP: ${{ vars.AKS_RESOURCE_GROUP }}
+      AKS_CLUSTER: ${{ vars.AKS_CLUSTER }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v4
+        with:
+          name: image
+      - uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Push the tested image to ACR
+        run: |
+          REGISTRY="$(az acr show -n "$ACR_NAME" --query loginServer -o tsv)"
+          echo "REGISTRY=$REGISTRY" >> "$GITHUB_ENV"
+          az acr login -n "$ACR_NAME"
+          docker load -i image.tar
+          docker tag "$IMAGE:$TAG" "$REGISTRY/$IMAGE:$TAG"
+          docker push "$REGISTRY/$IMAGE:$TAG"
+
+      - name: Get AKS credentials (Entra ID, not admin)
+        run: |
+          mkdir -p "$HOME/bin" && echo "$HOME/bin" >> "$GITHUB_PATH"
+          az aks install-cli --install-location "$HOME/bin/kubectl" \
+            --kubelogin-install-location "$HOME/bin/kubelogin" --only-show-errors
+          az aks get-credentials -g "$AKS_RESOURCE_GROUP" -n "$AKS_CLUSTER" --overwrite-existing
+          "$HOME/bin/kubelogin" convert-kubeconfig -l azurecli
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Helm upgrade (rolls back by itself on failure)
+        run: |
+          helm upgrade --install trdl charts/trdl \
+            --namespace trdl \
+            -f deploy/poc/values.yaml \
+            --set image.repository="$REGISTRY/$IMAGE" \
+            --set image.tag="$TAG" \
+            --wait --rollback-on-failure --timeout 5m
+
+      - name: Smoke test through the public IP
+        id: smoke
+        run: |
+          IP="$(kubectl -n trdl get svc trdl -o jsonpath='{.status.loadBalancer.ingress[0].ip}')"
+          if [ -z "$IP" ]; then echo "Service has no public IP"; kubectl -n trdl describe svc trdl; exit 1; fi
+          echo "url=http://$IP" >> "$GITHUB_OUTPUT"
+          bash tests/e2e/smoke.sh "http://$IP"

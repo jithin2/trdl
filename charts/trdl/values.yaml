@@ -1,0 +1,71 @@
+# Defaults for TRDL. Environment files (deploy/<env>/values.yaml) override these.
+
+replicaCount: 3
+
+image:
+  repository: trdl
+  # Set by CI to the git commit SHA. There is no default on purpose:
+  # a release without an explicit tag fails at render time.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+containerPort: 8080
+
+# Drain settings. terminationGracePeriodSeconds must be larger than
+# shutdownDelay + shutdownTimeout, or the kubelet kills the pod mid-drain.
+shutdownDelay: 5s
+shutdownTimeout: 15s
+terminationGracePeriodSeconds: 30
+
+service:
+  type: LoadBalancer
+  port: 80
+  annotations: {}
+
+# CPU request without a CPU limit: the app is never throttled when a node
+# has spare CPU. Memory limit equals the request: the pod gets a stable
+# memory budget and GOMEMLIMIT is set from it.
+resources:
+  requests:
+    cpu: 50m
+    memory: 32Mi
+  limits:
+    memory: 32Mi
+
+probes:
+  startup:
+    path: /healthz
+    periodSeconds: 2
+    failureThreshold: 15
+  liveness:
+    path: /healthz
+    periodSeconds: 10
+    timeoutSeconds: 2
+    failureThreshold: 3
+  readiness:
+    path: /readyz
+    periodSeconds: 5
+    timeoutSeconds: 2
+    failureThreshold: 2
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+
+podDisruptionBudget:
+  enabled: true
+  maxUnavailable: 1
+
+# One pod per zone first, then spread over nodes.
+topologySpread:
+  zone:
+    maxSkew: 1
+    whenUnsatisfiable: DoNotSchedule
+  node:
+    maxSkew: 1
+    whenUnsatisfiable: ScheduleAnyway
+
+networkPolicy:
+  enabled: true

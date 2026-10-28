@@ -1,0 +1,10 @@
+# Overrides for the kind e2e run. Everything else is the real chart default.
+image:
+  repository: trdl
+  pullPolicy: Never   # the image is loaded into kind, not pulled
+
+service:
+  type: ClusterIP     # kind has no cloud load balancer
+
+autoscaling:
+  enabled: false      # kind has no metrics-server

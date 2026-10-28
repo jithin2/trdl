@@ -1,0 +1,9 @@
+# PoC environment on AKS. CI sets image.repository and image.tag.
+# The names below match the resources created in infra/ (local.name = "trdl-poc").
+service:
+  type: LoadBalancer
+  annotations:
+    # Use the static, zone-redundant public IP made by Terraform,
+    # so the address survives a redeploy or a Helm uninstall.
+    service.beta.kubernetes.io/azure-load-balancer-resource-group: rg-trdl-poc
+    service.beta.kubernetes.io/azure-pip-name: pip-trdl-poc
