@@ -10,8 +10,12 @@ NAMESPACE="${NAMESPACE:-trdl}"
 BASE_URL="${1:-}"
 PF_PID=""
 
-# shellcheck disable=SC2329  # called by the EXIT trap
-cleanup() { [[ -n "$PF_PID" ]] && kill "$PF_PID" 2>/dev/null || true; }
+# shellcheck disable=SC2317,SC2329  # only called indirectly, by the EXIT trap below
+cleanup() {
+  if [[ -n "$PF_PID" ]]; then
+    kill "$PF_PID" 2>/dev/null || true
+  fi
+}
 trap cleanup EXIT
 
 if [[ -z "$BASE_URL" ]]; then
