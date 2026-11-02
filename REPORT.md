@@ -38,33 +38,11 @@ One change came out of task 1. The first plan had an NGINX Ingress. Upstream ing
 
 ## 3. Architecture
 
-```mermaid
-flowchart LR
-  client([Client]) -->|"HTTP :80"| pip["Static public IP<br/>zone-redundant"]
-  pip --> lb["Azure Standard<br/>Load Balancer"]
-
-  subgraph aks["AKS, Standard tier, Sweden Central"]
-    direction TB
-    subgraph z1["Zone 1"]
-      p1["trdl pod"]
-    end
-    subgraph z2["Zone 2"]
-      p2["trdl pod"]
-    end
-    subgraph z3["Zone 3"]
-      p3["trdl pod"]
-    end
-  end
-
-  lb --> p1 & p2 & p3
-
-  gh["GitHub Actions"] -->|"OIDC, no secret"| id["Managed identity"]
-  id -->|AcrPush| acr[("ACR")]
-  id -->|"RBAC Writer,<br/>namespace trdl only"| aks
-  acr -->|"AcrPull<br/>kubelet identity"| aks
-```
+![TRDL architecture: client to public IP to Azure Load Balancer to one pod in each of three zones, with GitHub Actions deploying through a managed identity](docs/architecture.svg)
 
 A request goes from the public IP to the Azure load balancer, then to any node, and kube-proxy sends it to a ready pod. There is one pod per zone. If a zone goes down, the load balancer and the other two pods keep working.
+
+The right-hand side of the diagram is the delivery path: GitHub Actions logs in to a managed identity with OIDC (no stored secret), pushes the image to ACR, and deploys into the `trdl` namespace only. Nodes pull images with their own kubelet identity, so there are no image pull secrets.
 
 ## 4. Design choices and reasons
 
@@ -219,7 +197,9 @@ return srv.Shutdown(shutdownCtx)   // stop accepting, finish open requests
 | **e2e on kind** | A kind cluster with 3 workers labelled as 3 zones. The chart is installed with the real image. `smoke.sh` checks the HTTP contract. `check-spread.sh` checks that pods run in 3 zones. `zero-downtime.sh` runs a client pod that calls the Service in a loop while every pod is replaced, and fails on one bad answer. | CI, and `make e2e` on a laptop |
 | **Smoke on AKS** | The same `smoke.sh` through the public IP after every deploy | CI deploy job |
 
-The zero-downtime test is the important one. It tests the drain code, the probes, the rolling update settings and the Service together, which is the claim "deploys do not cause errors".
+The zero-downtime test is the important one. It tests the drain code, the probes, the rolling update settings and the Service together, which is the claim "deploys do not cause errors". Run locally, it sent 1,083 requests through the Service while all 3 pods were replaced, with 0 failures.
+
+Running `make e2e` the first few times surfaced a real flaky-test cause, not a bug in the chart: kind's worker nodes can report `Ready` a moment before their startup taint actually clears, so if the chart installs in that window, every pod can land on whichever node clears first. `kubectl wait --for=condition=Ready nodes --all` alone did not close the gap; a short fixed delay after it did. I added that delay in both `Makefile` and the CI workflow, with a comment explaining why. A separate finding from the same session: a `kubectl rollout restart` (one pod replaced at a time, `maxSurge: 1`) can end a rollout slightly unbalanced across zones, because the scheduler weighs the spread rule against old and new pods together mid-rollout. A scale-to-zero-and-back, which places all pods at once, confirmed the spread rule itself is correct (1 pod per zone). Both are properties of how Kubernetes schedules incrementally, not defects in this chart.
 
 Not covered in the PoC: load tests and failure drills (section 10).
 
@@ -227,12 +207,7 @@ Not covered in the PoC: load tests and failure drills (section 10).
 
 `.github/workflows/pipeline.yml`:
 
-```
-app (unit tests) ──┐
-                   ├── build image ── e2e on kind ──┐
-chart (lint) ──────┘                                ├── deploy to AKS (main only)
-infra (terraform validate) ─────────────────────────┘
-```
+![Pipeline: app unit tests and chart lint feed build image, then e2e on kind, then deploy to AKS on main only, with terraform validate also gating deploy](docs/pipeline.svg)
 
 - Pull requests run everything except deploy.
 - The image is saved as an artifact after build. e2e and deploy use that same file.
@@ -320,5 +295,5 @@ In the order I would do it:
 | Unit tests, `go vet`, `gofmt` | Pass |
 | Helm lint and template | Defined in CI, not run yet |
 | Terraform `fmt` and `validate` | Defined in CI, not run yet |
-| Image build and e2e on kind | Defined in CI, not run yet |
-| Deploy to AKS and smoke test | Defined in CI, not run yet |
+| Image build and e2e on kind | Ran locally: image built, deployed on a 3-zone kind cluster, pods spread 1 per zone, rolling update sent 1,083 requests through the Service with 0 failures |
+| Deploy to AKS and smoke test | Defined in CI, not run yet (needs a real Azure subscription) |
