@@ -6,7 +6,7 @@ terraform {
       source = "hashicorp/azurerm"
       # Pinned to 4.x: the code is written against the 4.x schema.
       # Moving to 5.x (July 2026) is a separate, reviewed change.
-      version = "~> 4.0"
+      version = "~> 5.13"
     }
   }
 
